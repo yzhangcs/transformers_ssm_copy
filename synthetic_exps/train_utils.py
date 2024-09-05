@@ -1,14 +1,16 @@
-from torch.nn import CrossEntropyLoss
-from transformers import get_scheduler
-from tqdm import tqdm
-from pathlib import Path
-from torch.optim import AdamW
-import torch
 import os
+from pathlib import Path
+
+import torch
+from torch.nn import CrossEntropyLoss
+from torch.optim import AdamW
+from tqdm import tqdm
+from transformers import get_scheduler
+
 
 def ce_loss(inputs, logits, mask, TO_TOKEN):
     # Shift so that tokens < n predict n
-    if type(logits) != torch.Tensor:
+    if not isinstance(logits, torch.Tensor):
         logits = logits['logits']
     shift_labels = inputs.contiguous()
     shift_logits = logits.contiguous()
@@ -20,12 +22,13 @@ def ce_loss(inputs, logits, mask, TO_TOKEN):
     return torch.sum(loss*mask)/torch.sum(mask)
 
 
-def get_optimizer(model,args):
-    
+def get_optimizer(model, args):
+
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)
     return optimizer
 
-def custom_get_scheduler(optimizer,num_training_steps):
+
+def custom_get_scheduler(optimizer, num_training_steps):
 
     lr_scheduler = get_scheduler(
         name="linear",
@@ -36,11 +39,11 @@ def custom_get_scheduler(optimizer,num_training_steps):
     return lr_scheduler
 
 
-def train(args,model, train_dataset, TO_TOKEN):
-    
-    optimizer = get_optimizer(model,args)
-    
-    ## Set model to GPU
+def train(args, model, train_dataset, TO_TOKEN):
+
+    optimizer = get_optimizer(model, args)
+
+    # Set model to GPU
     from accelerate import Accelerator
 
     accelerator = Accelerator()
@@ -49,15 +52,12 @@ def train(args,model, train_dataset, TO_TOKEN):
         model, optimizer
     )
 
-
     num_train_epochs = args.epochs
     num_update_steps_per_epoch = args.steps
     num_training_steps = num_train_epochs * num_update_steps_per_epoch
     num_log_steps = 50
 
-    lr_scheduler = custom_get_scheduler(optimizer,num_training_steps)
-    
-
+    lr_scheduler = custom_get_scheduler(optimizer, num_training_steps)
 
     gradient_accumulation_steps = 1
 
@@ -73,22 +73,20 @@ def train(args,model, train_dataset, TO_TOKEN):
             desc=f'Epoch {epoch + 1}/{num_train_epochs}'
         )
         for step, batch in progress_bar:
-            x = batch['input_ids'][:,:-1].to('cuda')
-            y = batch['input_ids'][:,1:].to('cuda')
-            mask = batch['mask'][:,1:].to('cuda')
+            x = batch['input_ids'][:, :-1].to('cuda')
+            y = batch['input_ids'][:, 1:].to('cuda')
+            mask = batch['mask'][:, 1:].to('cuda')
 
-            if args.model=="lstm":
+            if args.model == "lstm":
                 state = model.init_hidden(args.train_batch_size, 'cuda')
 
-            if args.model=="lstm":
-               logits, state = model(x, state)
+            if args.model == "lstm":
+                logits, state = model(x, state)
             else:
-               logits = model(x)
+                logits = model(x)
 
-            if args.model=="mamba":
+            if args.model == "mamba":
                 logits = logits[0]
-
-
             loss = ce_loss(y, logits, mask, TO_TOKEN)
             if (step+1) % num_log_steps == 0:
                 avg_loss.append(0)
@@ -105,29 +103,35 @@ def train(args,model, train_dataset, TO_TOKEN):
                 completed_steps += 1
             if step > num_training_steps:
                 break
-            # Update tqdm description with the current loss
-            progress_bar.set_postfix({'Loss': loss.item()})
 
+            if not isinstance(logits, torch.Tensor):
+                logits = logits['logits']
+            preds = logits.argmax(dim=-1)
+            acc = (preds.eq(y) * mask).sum() / mask.sum()
+            # Update tqdm description with the current loss
+            progress_bar.set_postfix({'Loss': loss.item(), 'Acc': acc.item()})
 
 
 def save_model(args, model):
 
-
     if args.model.startswith("T"):
 
-        save_path = "./output_dir/"+f"model_{args.model}_layer_{args.layers}_hidden_{args.hidden_size}_heads_{args.heads}_train_{args.train_task}_lr_{args.lr}_epochs_{args.epochs}_steps_{args.steps}/"
+        save_path = "./output_dir/" + \
+            f"model_{args.model}_layer_{args.layers}_hidden_{args.hidden_size}_heads_{args.heads}_train_{
+                args.train_task}_lr_{args.lr}_epochs_{args.epochs}_steps_{args.steps}/"
 
+    else:
 
-    elif args.model == "lstm" or args.model == "mamba":
-
-        save_path = "./output_dir/"+f"model_{args.model}_layer_{args.layers}_hidden_{args.hidden_size}_train_{args.train_task}_lr_{args.lr}_epochs_{args.epochs}_steps_{args.steps}/"
+        save_path = "./output_dir/" + \
+            f"model_{args.model}_layer_{args.layers}_hidden_{args.hidden_size}_train_{
+                args.train_task}_lr_{args.lr}_epochs_{args.epochs}_steps_{args.steps}/"
 
     if not os.path.exists(save_path):
         Path(save_path).mkdir(parents=True, exist_ok=True)
 
-    #save model
-    if args.model=="lstm" or args.model=="mamba":
+    # save model
+    if args.model == "lstm" or args.model == "mamba":
         save_path += "model.pt"
-        torch.save(model,save_path)
+        torch.save(model, save_path)
     else:
         model.save_pretrained(save_path)
